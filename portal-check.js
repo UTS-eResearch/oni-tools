@@ -31,12 +31,17 @@ const logger = winston.createLogger({
 });
 
 const CATALOGS = [ 'ro-crate-metadata.json', 'ro-crate-metadata.jsonld' ];
+const NAMESPACE = 'public_ocfl';
 
 var argv = require('yargs')
   .usage('Usage: $0 [options]')
   .describe('r', 'OCFL repo')
   .alias('r', 'repo')
   .string('r')
+  .describe('n', 'Identifier namespace')
+  .alias('n', 'namespace')
+  .string('n')
+  .default('n', NAMESPACE)
   .describe('o', 'Oni URL')
   .alias('o', 'oni')
   .string('o')
@@ -53,9 +58,41 @@ async function main (argv) {
 
   logger.info(`Got ${records.length} ocfl objects`);
 
+  for( let record of records ) {
+  	try {
+  		logger.info(`Loading ro-crate from ${record['path']}`);
+  		const crate = new ROCrate(record['jsonld']);
+  		crate.index();
+  		const oid = crate.getNamedIdentifier(argv.namespace) || 'identifier not found';
+  		logger.info(`[${oid}] Checking files from ro-crate`);
+  		const graph = crate.getGraph();
+  		for( let item of graph ) {
+  			if( item['@type'] === 'File' ) {
+  				const file = item['@id'];
+  				const fpath = await record['ocflObject'].getFilePath(file);
+  				if( !fpath ) {
+  					logger.error(`[${oid}] ${file} not found`);
+  				} else {
+  					logger.debug(`[${oid}] ${file} found in inventory`)
+  				}
+  			}
+  		}
+  	} catch (e) {
+  		logger.error(`Error reading ro-crate at ${record['path']}: ${e}`);
+  	}
+  }
+
 }
 
 
+
+async function getFileFromOCFL(ocflObject, file) {
+	try {
+		return await ocflObject.getFilePath(file);
+	} catch(e) {
+		return null;
+	}
+}
 
 
 
@@ -88,7 +125,7 @@ async function loadFromOcfl(repoPath, catalogFilename) {
         jsonld: json,
         ocflObject: object
       });
-      logger.info(`Loaded ocfl object ${object.path}`);
+      logger.debug(`Loaded ocfl object ${object.path}`);
     } else {
       logger.error(`Couldn't find ${catalogFilename} in ${object.path}`);
     }

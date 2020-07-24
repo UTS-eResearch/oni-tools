@@ -58,22 +58,37 @@ async function main (argv) {
 
   logger.info(`Got ${records.length} ocfl objects`);
 
+  const errors = {};
+
   for( let record of records ) {
+  	logger.debug(record['path']);
+		const inv = await record['ocflObject'].getInventory();
+		const vhead = inv.head;
   	try {
-  		logger.info(`Loading ro-crate from ${record['path']}`);
+  		logger.debug(`Loading ${record['path']} / ${record['metadata']}`)
   		const crate = new ROCrate(record['jsonld']);
   		crate.index();
-  		const oid = crate.getNamedIdentifier(argv.namespace) || 'identifier not found';
-  		logger.info(`[${oid}] Checking files from ro-crate`);
+  		var oid = crate.getNamedIdentifier(argv.namespace);
+  		if( !oid ) {
+  			logger.warn(`${record['path']}/${record['metadata']} couldn't find identifier in ${argv.namespace}`);
+  			oid = record['path'];
+  		}
+  		logger.debug(`[${oid}] Checking files from ro-crate`);
   		const graph = crate.getGraph();
   		for( let item of graph ) {
   			if( item['@type'] === 'File' ) {
   				const file = item['@id'];
-  				const fpath = await record['ocflObject'].getFilePath(file);
-  				if( !fpath ) {
-  					logger.error(`[${oid}] ${file} not found`);
-  				} else {
-  					logger.debug(`[${oid}] ${file} found in inventory`)
+  				try { 
+  					const fpath = await record['ocflObject'].getFilePath(file);
+  					logger.debug(`[${oid}] ${file} found OK: ${fpath}`);
+  				} catch(e) {
+ 						logger.error(`[${oid}] file missing from ${vhead}: ${file}`);
+ 						const occurs = await searchEarlier(record['ocflObject'], file);
+ 						if( Object.keys(occurs).length > 0 ) {
+ 							logger.info(`[${oid}] found this filename in versions: ${Object.keys(occurs)}`);
+ 						} else {
+ 							logger.info(`[${oid}] can't find filename in any version`);
+ 						}
   				}
   			}
   		}
@@ -83,18 +98,6 @@ async function main (argv) {
   }
 
 }
-
-
-
-async function getFileFromOCFL(ocflObject, file) {
-	try {
-		return await ocflObject.getFilePath(file);
-	} catch(e) {
-		return null;
-	}
-}
-
-
 
 
 
@@ -110,10 +113,12 @@ async function loadFromOcfl(repoPath, catalogFilename) {
     const inv = await object.getInventory();
     const headState = inv.versions[inv.head].state;
     var json = null;
+    var metadata_file = null;
     for (let hash of Object.keys(headState)) {
       for( let cfile of catalogs ) {
         if (headState[hash].includes(cfile)) {
           const jsonfile = path.join(object.path, inv.manifest[hash][0]);
+          metadata_file = cfile;
           json = await fs.readJson(jsonfile);
           break;
         }
@@ -121,6 +126,7 @@ async function loadFromOcfl(repoPath, catalogFilename) {
     }
     if( json ) {
       records.push({
+      	metadata: metadata_file,
         path: path.relative(repoPath, object.path),
         jsonld: json,
         ocflObject: object
@@ -134,3 +140,19 @@ async function loadFromOcfl(repoPath, catalogFilename) {
 }
 
 
+// Look up a file in any version of the inventory - called when we can't
+// find a file in the head
+
+async function searchEarlier(ocflObject, file) {
+	const inv = await ocflObject.getInventory();
+	const occurs = {};
+	for( let v in inv.versions ) {
+		for( let h in inv.versions[v].state ) {
+			if( inv.versions[v].state[h].includes(file) ) {
+				const fpath = inv.manifest[h][0];
+				occurs[v] = fpath;
+			}
+		}
+	}
+	return occurs;
+}

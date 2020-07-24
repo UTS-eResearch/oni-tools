@@ -2,6 +2,7 @@
   "name": "oni-tools",
   "version": "1.0.0",
   "description": "Tools for checking and testing an oni portal",
+  "repository": "https://github.com/UTS-eResearch/oni-tools",
   "main": "portal-check.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"

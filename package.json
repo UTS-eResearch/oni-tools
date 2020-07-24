@@ -1,0 +1,25 @@
+{
+  "name": "oni-tools",
+  "version": "1.0.0",
+  "description": "Tools for checking and testing an oni portal",
+  "main": "portal-check.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "oni",
+    "ocfl",
+    "ro-crate",
+    "data"
+  ],
+  "author": "Mike Lynch",
+  "license": "GPL-3.0-or-later",
+  "dependencies": {
+    "axios": "^0.19.2",
+    "fs-extra": "^9.0.1",
+    "lodash": "^4.17.19",
+    "ocfl": "^1.0.9",
+    "ro-crate": "^1.4.1",
+    "winston": "^3.3.3"
+  }
+}

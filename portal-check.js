@@ -24,6 +24,7 @@ const hasha = require('hasha');
 const uuid = require('uuid');
 const OCFLRepository = require('ocfl').Repository;
 const winston = require('winston');
+const cliProgress = require('cli-progress');
 
 const DIGEST_ALGORITHM = 'sha512';
 
@@ -237,13 +238,29 @@ async function resolveOni(oniUrl, oid, file) {
 async function downloadFromOni(oniUrl, oid, file, dlfile) {
   const url = oniUrl + oid + '/' + file;
   const writer = fs.createWriteStream(dlfile);
+  logger.info(`Download ${url} => ${dlfile}`);
   const response = await axios.get(url, { responseType: 'stream'});
+  const size = response.headers['content-length'];
+  var progress = 0;
+  const pb = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
+  pb.start(size, 0);
+
+  response.data.on('data', chunk => {
+    progress += chunk.length;
+    pb.update(progress);
+  });
 
   response.data.pipe(writer);
 
   return new Promise((resolve, reject) => {
-    writer.on('finish', resolve);
-    writer.on('error', reject);
+    writer.on('finish', () => {
+      pb.stop();
+      resolve();
+    });
+    writer.on('error', () => {
+      pb.stop();
+      reject()
+    });
   });
 }
 

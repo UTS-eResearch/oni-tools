@@ -15,23 +15,21 @@
 
 // then try to fetch them from oni and see what happens
 
-
 const axios = require('axios');
 const _ = require('lodash');
 const ROCrate = require('ro-crate').ROCrate;
 const fs = require('fs-extra');
 const path = require('path');
+const hasha = require('hasha');
+const uuid = require('uuid');
 const OCFLRepository = require('ocfl').Repository;
 const winston = require('winston');
 
-const consoleLog = new winston.transports.Console();
-const logger = winston.createLogger({
-  format: winston.format.simple(),
-  transports: [ consoleLog ]
-});
+const DIGEST_ALGORITHM = 'sha512';
 
 const CATALOGS = [ 'ro-crate-metadata.json', 'ro-crate-metadata.jsonld' ];
 const NAMESPACE = 'public_ocfl';
+const DOWNLOADS = './downloads';
 
 var argv = require('yargs')
   .usage('Usage: $0 [options]')
@@ -45,15 +43,42 @@ var argv = require('yargs')
   .describe('o', 'Oni URL')
   .alias('o', 'oni')
   .string('o')
+  .alias('o', 'oni')
+  .string('o')
+  .default('v', false)
+  .alias('v', 'verbose')
+  .describe('v', 'verbose logging')
+  .boolean('v')
+  .default('f', false)
+  .alias('f', 'fixity')
+  .describe('f', 'Fixity check')
+  .boolean('f')
+  .default('d', '')
+  .alias('d', 'download')
+  .describe('d', 'Regexp filter for file download')
+  .string('d')
   .help('h')
   .alias('h', 'help')
   .argv;
 
 
+// TODO: log file
+
+
+const consoleLog = new winston.transports.Console({
+  level: argv.verbose ? 'debug' : 'info'
+});
+
+const logger = winston.createLogger({
+  format: winston.format.simple(),
+  transports: [ consoleLog ]
+});
+
 
 main(argv);
 
 async function main (argv) {
+  const oni = argv.oni;
 	const records = await loadFromOcfl(argv.repo, CATALOGS);
 
   logger.info(`Got ${records.length} ocfl objects`);
@@ -63,25 +88,29 @@ async function main (argv) {
   for( let record of records ) {
   	logger.debug(record['path']);
 		const inv = await record['ocflObject'].getInventory();
-		const vhead = inv.head;
+    const vhead = inv.head;
+    const manifest = inv.manifest;
   	try {
   		logger.debug(`Loading ${record['path']} / ${record['metadata']}`)
-  		const crate = new ROCrate(record['jsonld']);
+  		crate = new ROCrate(record['jsonld']);
   		crate.index();
-  		var oid = crate.getNamedIdentifier(argv.namespace);
-  		if( !oid ) {
-  			logger.warn(`${record['path']}/${record['metadata']} couldn't find identifier in ${argv.namespace}`);
-  			oid = record['path'];
-  		}
+    } catch (e) {
+      logger.error(`Error reading ro-crate at ${record['path']}: ${e}`);
+    }
+    if( crate ) {
+      const oid = crate.getNamedIdentifier(argv.namespace);
+      if( !oid ) {
+        logger.warn(`${record['path']}/${record['metadata']} couldn't find identifier in ${argv.namespace}`);
+      }
   		logger.debug(`[${oid}] Checking files from ro-crate`);
   		const graph = crate.getGraph();
   		for( let item of graph ) {
   			if( item['@type'] === 'File' ) {
   				const file = item['@id'];
-  				try { 
-  					const fpath = await record['ocflObject'].getFilePath(file);
-  					logger.debug(`[${oid}] ${file} found OK: ${fpath}`);
-  				} catch(e) {
+ 					const fpath = await resolveOcfl(record['ocflObject'], file);
+          if( fpath ) {
+  					logger.debug(`[${oid}] ${file} found in ocfl repo OK: ${fpath}`);
+  				} else {
  						logger.error(`[${oid}] file missing from ${vhead}: ${file}`);
  						const occurs = await searchEarlier(record['ocflObject'], file);
  						if( Object.keys(occurs).length > 0 ) {
@@ -90,14 +119,30 @@ async function main (argv) {
  							logger.info(`[${oid}] can't find filename in any version`);
  						}
   				}
+          if( argv.oni && oid && fpath ) {
+            if( !argv.download || fpath.match(RegExp(argv.download)) ) {
+              const dlfile = await resolveOni(argv.oni, oid, file);
+              if( dlfile ) {
+                logger.debug(`[${oid}] ${file} fetched from oni portal ok`);
+                if( argv.fixity ) {
+                  if( await checkFixity(manifest, fpath, dlfile) ) {
+                    logger.debug(`[${oid}] ${file} download fixity OK`);
+                  } else {
+                    logger.error(`[${oid}] ${file} download fixity error`);
+                  }
+                }
+              } else {
+                logger.error(`[${oid}] ${file} fetch from oni failed`);
+              }
+            }
+          }
   			}
   		}
-  	} catch (e) {
-  		logger.error(`Error reading ro-crate at ${record['path']}: ${e}`);
-  	}
-  }
-
+    }
+  }  
 }
+
+
 
 
 
@@ -139,6 +184,20 @@ async function loadFromOcfl(repoPath, catalogFilename) {
   return records;
 }
 
+// tries to resolve a path in an ocflObject to its path on the
+// filesystem, returns null if this fails
+
+async function resolveOcfl(ocflObject, file) {
+  try {
+    const fpath = await ocflObject.getFilePath(file);
+    return fpath;
+  } catch(e) {
+    logger.debug(`resolution error ${e}`);
+    return null;
+  }
+}
+
+
 
 // Look up a file in any version of the inventory - called when we can't
 // find a file in the head
@@ -155,4 +214,53 @@ async function searchEarlier(ocflObject, file) {
 		}
 	}
 	return occurs;
+}
+
+// TODO - make a version of this which cancels the gets so that we don't
+// have to download an entire repo to verify that the links work?
+
+
+async function resolveOni(oniUrl, oid, file) {
+  const dlfile = path.join(DOWNLOADS, uuid.v4());
+  try {
+    await downloadFromOni(oniUrl, oid, file, dlfile);
+    return dlfile
+  } catch(e) {
+    logger.error(`Download ${file} to ${dlfile} failed: ${e}`);
+    return false;
+  }
+}
+
+
+
+
+async function downloadFromOni(oniUrl, oid, file, dlfile) {
+  const url = oniUrl + oid + '/' + file;
+  const writer = fs.createWriteStream(dlfile);
+  const response = await axios.get(url, { responseType: 'stream'});
+
+  response.data.pipe(writer);
+
+  return new Promise((resolve, reject) => {
+    writer.on('finish', resolve);
+    writer.on('error', reject);
+  });
+}
+
+
+async function checkFixity(manifest, fpath, dlfile) {
+  for( let hash in manifest ) {
+    const mpath = manifest[hash];
+    if( mpath.includes(fpath) ) {
+      const dhash = await hasha.fromFile(dlfile, { algorithm: DIGEST_ALGORITHM });
+      if( dhash === hash ) {
+        logger.debug(`Fixity check passed: ${dlfile} ${fpath} ${dhash}`);
+        return true;
+      }
+      logger.error(`${fpath} hash mismatch: expected ${hash} got ${dhash}`);
+      return false;
+    }
+  }
+  logger.error(`Couldn't find ${fpath} in manifest`);
+  return false;
 }

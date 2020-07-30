@@ -16,6 +16,7 @@
 // then try to fetch them from oni and see what happens
 
 const axios = require('axios');
+const CancelToken = axios.CancelToken;
 const _ = require('lodash');
 const ROCrate = require('ro-crate').ROCrate;
 const fs = require('fs-extra');
@@ -31,6 +32,8 @@ const DIGEST_ALGORITHM = 'sha512';
 const CATALOGS = [ 'ro-crate-metadata.json', 'ro-crate-metadata.jsonld' ];
 const NAMESPACE = 'public_ocfl';
 const DOWNLOADS = './downloads';
+
+const TRUNCATE = 40000;
 
 var argv = require('yargs')
   .usage('Usage: $0 [options]')
@@ -52,7 +55,7 @@ var argv = require('yargs')
   .boolean('v')
   .default('f', false)
   .alias('f', 'fixity')
-  .describe('f', 'Fixity check')
+  .describe('f', 'Download and run fixity check on all files')
   .boolean('f')
   .default('d', '')
   .alias('d', 'download')
@@ -75,7 +78,6 @@ const logger = winston.createLogger({
   transports: [ consoleLog ]
 });
 
-
 main(argv);
 
 async function main (argv) {
@@ -85,6 +87,7 @@ async function main (argv) {
   logger.info(`Got ${records.length} ocfl objects`);
 
   const errors = {};
+  const max_size = argv.fixity ? null : TRUNCATE;
 
   for( let record of records ) {
   	logger.debug(record['path']);
@@ -122,7 +125,7 @@ async function main (argv) {
   				}
           if( argv.oni && oid && fpath ) {
             if( !argv.download || fpath.match(RegExp(argv.download)) ) {
-              const dlfile = await resolveOni(argv.oni, oid, file);
+              const dlfile = await resolveOni(argv.oni, oid, file, max_size);
               if( dlfile ) {
                 logger.debug(`[${oid}] ${file} fetched from oni portal ok`);
                 if( argv.fixity ) {
@@ -132,6 +135,7 @@ async function main (argv) {
                     logger.error(`[${oid}] ${file} download fixity error`);
                   }
                 }
+                await deleteDownload(dlfile);
               } else {
                 logger.error(`[${oid}] ${file} fetch from oni failed`);
               }
@@ -221,10 +225,10 @@ async function searchEarlier(ocflObject, file) {
 // have to download an entire repo to verify that the links work?
 
 
-async function resolveOni(oniUrl, oid, file) {
+async function resolveOni(oniUrl, oid, file, max) {
   const dlfile = path.join(DOWNLOADS, uuid.v4());
   try {
-    await downloadFromOni(oniUrl, oid, file, dlfile);
+    await downloadFromOni(oniUrl, oid, file, dlfile, max);
     return dlfile
   } catch(e) {
     logger.error(`Download ${file} to ${dlfile} failed: ${e}`);
@@ -235,12 +239,16 @@ async function resolveOni(oniUrl, oid, file) {
 
 
 
-async function downloadFromOni(oniUrl, oid, file, dlfile) {
+async function downloadFromOni(oniUrl, oid, file, dlfile, max) {
   const url = oniUrl + oid + '/' + file;
-  const writer = fs.createWriteStream(dlfile);
+  const source = CancelToken.source();
   logger.info(`Download ${url} => ${dlfile}`);
-  const response = await axios.get(url, { responseType: 'stream'});
-  const size = response.headers['content-length'];
+  const response = await axios.get(url, {
+    cancelToken: source.token, 
+    responseType: 'stream'
+  });
+  const cl = response.headers['content-length'];
+  const size = max ? ( cl > max ? max : cl ) : cl;
   var progress = 0;
   const pb = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
   pb.start(size, 0);
@@ -248,7 +256,12 @@ async function downloadFromOni(oniUrl, oid, file, dlfile) {
   response.data.on('data', chunk => {
     progress += chunk.length;
     pb.update(progress);
+    if( max && progress > max ) {
+      source.cancel('Download maximum reached');
+    }
   });
+
+  const writer = fs.createWriteStream(dlfile);
 
   response.data.pipe(writer);
 
@@ -257,9 +270,10 @@ async function downloadFromOni(oniUrl, oid, file, dlfile) {
       pb.stop();
       resolve();
     });
-    writer.on('error', () => {
+    writer.on('error', (e) => {
       pb.stop();
-      reject()
+      logger.error(`Download error ${e}`);
+      reject();
     });
   });
 }
@@ -280,4 +294,12 @@ async function checkFixity(manifest, fpath, dlfile) {
   }
   logger.error(`Couldn't find ${fpath} in manifest`);
   return false;
+}
+
+async function deleteDownload(dlfile) {
+  try {
+    await fs.unlink(dlfile);
+  } catch(e) {
+    logger.warn(`Couldn't delete downloaded ${dlfile}: ${e}`);
+  }
 }
